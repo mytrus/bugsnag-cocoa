@@ -33,6 +33,7 @@
 #import "BugsnagCollections.h"
 #import "BugsnagCrashReport.h"
 #import "BugsnagSink.h"
+#import "BugsnagLogger.h"
 
 #if TARGET_IPHONE_SIMULATOR || TARGET_OS_IPHONE
 #import <UIKit/UIKit.h>
@@ -41,7 +42,7 @@
 #import <AppKit/AppKit.h>
 #endif
 
-NSString *const NOTIFIER_VERSION = @"5.7.0";
+NSString *const NOTIFIER_VERSION = @"5.8.0";
 NSString *const NOTIFIER_URL = @"https://github.com/bugsnag/bugsnag-cocoa";
 NSString *const BSTabCrash = @"crash";
 NSString *const BSTabConfig = @"config";
@@ -49,6 +50,7 @@ NSString *const BSAttributeSeverity = @"severity";
 NSString *const BSAttributeDepth = @"depth";
 NSString *const BSAttributeBreadcrumbs = @"breadcrumbs";
 NSString *const BSEventLowMemoryWarning = @"lowMemoryWarning";
+NSUInteger const BSG_MAX_STORED_REPORTS = 12;
 
 struct bugsnag_data_t {
     // Contains the user-specified metaData, including the user tab from config.
@@ -73,16 +75,16 @@ static struct bugsnag_data_t g_bugsnag_data;
  */
 void BSSerializeDataCrashHandler(const KSCrashReportWriter *writer) {
     if (g_bugsnag_data.configJSON) {
-        writer->addJSONElement(writer, "config", g_bugsnag_data.configJSON, true);
+        writer->addJSONElement(writer, "config", g_bugsnag_data.configJSON);
     }
     if (g_bugsnag_data.metaDataJSON) {
-        writer->addJSONElement(writer, "metaData", g_bugsnag_data.metaDataJSON, true);
+        writer->addJSONElement(writer, "metaData", g_bugsnag_data.metaDataJSON);
     }
     if (g_bugsnag_data.stateJSON) {
-        writer->addJSONElement(writer, "state", g_bugsnag_data.stateJSON, true);
+        writer->addJSONElement(writer, "state", g_bugsnag_data.stateJSON);
     }
     if (g_bugsnag_data.userOverridesJSON) {
-        writer->addJSONElement(writer, "overrides", g_bugsnag_data.userOverridesJSON, true);
+        writer->addJSONElement(writer, "overrides", g_bugsnag_data.userOverridesJSON);
     }
     if (g_bugsnag_data.onCrash) {
         g_bugsnag_data.onCrash(writer);
@@ -106,7 +108,7 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
         NSData *json = [NSJSONSerialization dataWithJSONObject:dictionary options:0 error:&error];
 
         if (!json) {
-            NSLog(@"Bugsnag could not serialize metaData: %@", error);
+            bsg_log_err(@"could not serialize metaData: %@", error);
             return;
         }
         *destination = reallocf(*destination, [json length] + 1);
@@ -115,7 +117,7 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
             (*destination)[[json length]] = '\0';
         }
     } @catch (NSException *exception) {
-        NSLog(@"Bugsnag could not serialize metaData: %@", exception);
+        bsg_log_err(@"could not serialize metaData: %@", exception);
     }
 }
 
@@ -147,18 +149,22 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
 }
 
 - (void) start {
-    [KSCrash sharedInstance].sink = [[BugsnagSink alloc] init];
+    BugsnagSink* sink = [BugsnagSink new];
+    [KSCrash sharedInstance].sink = sink;
     // We don't use this feature yet, so we turn it off
     [KSCrash sharedInstance].introspectMemory = NO;
     [KSCrash sharedInstance].deleteBehaviorAfterSendAll = KSCDeleteOnSucess;
     [KSCrash sharedInstance].onCrash = &BSSerializeDataCrashHandler;
+    [KSCrash sharedInstance].maxStoredReports = BSG_MAX_STORED_REPORTS;
+    [KSCrash sharedInstance].demangleLanguages = 0;
 
     if (!configuration.autoNotify) {
         kscrash_setHandlingCrashTypes(KSCrashTypeUserReported);
     }
-    [[KSCrash sharedInstance] install];
+    if (![[KSCrash sharedInstance] install])
+        bsg_log_err(@"Failed to install crash handler. No exceptions will be reported!");
 
-    [self performSelectorInBackground:@selector(sendPendingReports) withObject:nil];
+    [sink sendPendingReports];
     [self updateAutomaticBreadcrumbDetectionSettings];
 #if TARGET_OS_TV
   [self.details setValue:@"tvOS Bugsnag Notifier" forKey:@"name"];
@@ -250,7 +256,9 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
       crumb.metadata = @{ @"message": reportMessage, @"severity": BSGFormatSeverity(report.severity) };
     }];
 
-    [self performSelectorInBackground:@selector(sendPendingReports) withObject:nil];
+    BugsnagSink *sink = [KSCrash sharedInstance].sink;
+    if ([sink isKindOfClass:[BugsnagSink class]])
+        [sink sendPendingReports];
 }
 
 - (void)addBreadcrumbWithBlock:(void(^ _Nonnull)(BugsnagBreadcrumb *_Nonnull))block {
@@ -269,22 +277,6 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
     [self.state addAttribute:BSAttributeBreadcrumbs withValue:arrayValue toTabWithName:BSTabCrash];
 }
 
-- (void) sendPendingReports {
-    @autoreleasepool {
-        @try {
-            [[KSCrash sharedInstance] sendAllReportsWithCompletion:^(NSArray *filteredReports, BOOL completed, NSError *error) {
-                if (error)
-                    NSLog(@"Failed to send Bugsnag reports: %@", error);
-                else if (filteredReports.count > 0)
-                    NSLog(@"Bugsnag reports sent.");
-            }];
-        }
-        @catch (NSException* e) {
-            NSLog(@"Error sending report to Bugsnag: %@", e);
-        }
-    }
-}
-
 - (void) metaDataChanged:(BugsnagMetaData *)metaData {
 
     if (metaData == self.configuration.metaData) {
@@ -297,7 +289,7 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
     } else if (metaData == self.state) {
         BSSerializeJSONDictionary([metaData toDictionary], &g_bugsnag_data.stateJSON);
     } else {
-        NSLog(@"Unknown metadata dictionary changed");
+        bsg_log_debug(@"Unknown metadata dictionary changed");
     }
 }
 
