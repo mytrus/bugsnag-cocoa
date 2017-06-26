@@ -9,6 +9,8 @@
 #import "Bugsnag.h"
 #import "BugsnagCollections.h"
 #import "BugsnagCrashReport.h"
+#import "BugsnagLogger.h"
+#import "BSGSerialization.h"
 
 NSMutableDictionary *BSGFormatFrame(NSDictionary *frame,
                                     NSArray *binaryImages) {
@@ -216,6 +218,10 @@ NSDictionary *BSGParseCustomException(NSDictionary *report, NSString *errorClass
 
 static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
 
+@interface NSDictionary (BSGKSMerge)
+- (NSDictionary*)BSG_mergedInto:(NSDictionary *)dest;
+@end
+
 @interface BugsnagCrashReport ()
 
 /**
@@ -291,6 +297,42 @@ static NSString *const DEFAULT_EXCEPTION_TYPE = @"cocoa";
         _overrides = [NSDictionary new];
     }
     return self;
+}
+
+- (void)setMetaData:(NSDictionary *)metaData {
+    _metaData = BSGSanitizeDict(metaData);
+}
+
+- (void)addMetadata:(NSDictionary*_Nonnull)tabData
+      toTabWithName:(NSString *_Nonnull)tabName {
+    NSDictionary *cleanedData = BSGSanitizeDict(tabData);
+    if ([cleanedData count] == 0) {
+        bsg_log_err(@"Failed to add metadata: Values not convertible to JSON");
+        return;
+    }
+    NSMutableDictionary *allMetadata = [self.metaData mutableCopy];
+    NSMutableDictionary *allTabData = allMetadata[tabName] ?: [NSMutableDictionary new];
+    allMetadata[tabName] = [cleanedData BSG_mergedInto:allTabData];
+    self.metaData = allMetadata;
+}
+
+- (void)addAttribute:(NSString*)attributeName
+           withValue:(id)value
+       toTabWithName:(NSString*)tabName {
+    NSMutableDictionary *allMetadata = [self.metaData mutableCopy];
+    NSMutableDictionary *allTabData = allMetadata[tabName] ?: [NSMutableDictionary new];
+    if (value) {
+        id cleanedValue = BSGSanitizeObject(value);
+        if (!cleanedValue) {
+            bsg_log_err(@"Failed to add metadata: Value of type %@ is not convertible to JSON", [value class]);
+            return;
+        }
+        allTabData[attributeName] = cleanedValue;
+    } else {
+        [allTabData removeObjectForKey:attributeName];
+    }
+    allMetadata[tabName] = allTabData;
+    self.metaData = allMetadata;
 }
 
 - (BOOL)shouldBeSent {

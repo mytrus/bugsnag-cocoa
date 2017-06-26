@@ -42,7 +42,7 @@
 #import <AppKit/AppKit.h>
 #endif
 
-NSString *const NOTIFIER_VERSION = @"5.8.0";
+NSString *const NOTIFIER_VERSION = @"5.10.1";
 NSString *const NOTIFIER_URL = @"https://github.com/bugsnag/bugsnag-cocoa";
 NSString *const BSTabCrash = @"crash";
 NSString *const BSTabConfig = @"config";
@@ -103,6 +103,10 @@ NSString *BSGBreadcrumbNameForNotificationName(NSString *name) {
  *  @param destination target location of the data
  */
 void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
+    if (![NSJSONSerialization isValidJSONObject:dictionary]) {
+        bsg_log_err(@"could not serialize metadata: is not valid JSON object");
+        return;
+    }
     @try {
         NSError *error;
         NSData *json = [NSJSONSerialization dataWithJSONObject:dictionary options:0 error:&error];
@@ -405,13 +409,16 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
              UIApplicationWillTerminateNotification,
              UIApplicationWillEnterForegroundNotification,
              UIApplicationDidEnterBackgroundNotification,
-             UIApplicationUserDidTakeScreenshotNotification,
              UIKeyboardDidShowNotification,
              UIKeyboardDidHideNotification,
              UIMenuControllerDidShowMenuNotification,
              UIMenuControllerDidHideMenuNotification,
              NSUndoManagerDidUndoChangeNotification,
-             NSUndoManagerDidRedoChangeNotification];
+             NSUndoManagerDidRedoChangeNotification,
+#if __IPHONE_OS_VERSION_MIN_REQUIRED >= __IPHONE_7_0
+             UIApplicationUserDidTakeScreenshotNotification
+#endif
+            ];
 #elif TARGET_OS_MAC
     return @[NSApplicationDidBecomeActiveNotification,
              NSApplicationDidResignActiveNotification,
@@ -547,9 +554,11 @@ void BSSerializeJSONDictionary(NSDictionary *dictionary, char **destination) {
     [self addBreadcrumbWithBlock:^(BugsnagBreadcrumb *_Nonnull breadcrumb) {
         breadcrumb.type = BSGBreadcrumbTypeUser;
         breadcrumb.name = BSGBreadcrumbNameForNotificationName(note.name);
-        NSString *label = control.accessibilityLabel;
-        if (label.length > 0) {
-            breadcrumb.metadata = @{ @"label": label };
+        if ([control respondsToSelector:@selector(accessibilityLabel)]) {
+            NSString *label = control.accessibilityLabel;
+            if (label.length > 0) {
+                breadcrumb.metadata = @{ @"label": label };
+            }
         }
     }];
 #endif
